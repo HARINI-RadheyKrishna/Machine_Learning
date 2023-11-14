@@ -33,12 +33,17 @@ class Aggregator:
         # the weight of each local model is num of samples on that client / total num of samples
         # return the aggregated model params in the form of a state_dict
         
-
-        total_samples = sum(num_samples_list)
+        tot_samples = sum(num_samples_list)
         avg_params = {}
-        for key in state_dict_list[0].keys():
-            weighted_sum = sum(state_dict[key] * (num_samples / total_samples) for state_dict, num_samples in zip(state_dict_list, num_samples_list))
-            avg_params[key] = weighted_sum
+
+        for i in state_dict_list[0]:
+            avg_params[i] = torch.zeros_like(state_dict_list[0][i])
+        
+        for state_dict, num_samples in zip(state_dict_list, num_samples_list):
+            weighted_sum = num_samples / tot_samples
+            for i in avg_params.keys():
+                avg_params[i] += (state_dict[i] * weighted_sum)
+
         return avg_params
 
 
@@ -76,7 +81,6 @@ if __name__ == "__main__":
     )
 
     # plot the distribution of each client's dataset
-  
     plot_data_split(
         data_split=train_data_split,
         num_clients=size - 1,
@@ -98,54 +102,63 @@ if __name__ == "__main__":
         # rank 0 is the parameter server and rest of the ranks are clients
         if rank == 0:
             # TODO: get global model params from the aggregator
-            global_model_params = aggregator.get_model_params()
+            
+            global_params = aggregator.get_model_params()
 
             # TODO: send global model params to other ranks
+            
             for i in range(1, size):
-                comm.send(global_model_params, dest=i, tag = 0)
+                comm.send(global_params, dest=i, tag=i)
 
             local_model_params_list = []
             num_samples_list = []
+            
+            
             # TODO: receive local model params from other ranks and append to local_model_params_list
             # and receive number of samples from other ranks and append to num_samples_list
+            
             for i in range(1, size):
-                local_model_params = comm.recv(source=i, tag = 1)
-                num_samples = comm.recv(source=i, tag = 2)
-                local_model_params_list.append(local_model_params)
+                local_params = comm.recv(source=i, tag=i+50)
+                num_samples = comm.recv(source=i, tag=i+100)
+                
+                local_model_params_list.append(local_params)
                 num_samples_list.append(num_samples)
 
             # TODO: aggregate local model params
-            avg_params = aggregator.aggregate(local_model_params_list, num_samples_list)
+            
+            aggr_local_params = aggregator.aggregate(local_model_params_list,num_samples_list)
 
             # TODO: set global model params to the aggregator
-            aggregator.set_model_params(avg_params)
+            
+            aggregator.set_model_params(aggr_local_params)
 
             logging.info(
                 f"--------- | Round: {round_idx} | aggregation finished | ---------"
             )
         else:
             # TODO: create data loader on local dataset
-            train_loader, test_loader = create_dataloader(
-                train_data_split[rank-1],test_data_split[rank-1], batch_size=batch_size
-            )
+            
+            train_loader, test_loader = create_dataloader(train_data_split[rank - 1], test_data_split[rank-1], batch_size)
 
             # TODO: receive global model params from parameter server
-            global_model_params = comm.recv(source=0, tag = 0)
+            
+            global_params = comm.recv(source=0, tag=rank)
             
             # TODO: set local model params
-            model.load_state_dict(global_model_params)
+            
+            model.load_state_dict(global_params)
 
             # start local training
             model.train()
             running_loss = 0
 
             for epoch_idx in range(num_epochs):
-                for batch_idx, (data_local, target_local) in enumerate(train_loader):
-                    data_local = data_local.to(device)
-                    target_local = target_local.to(device)
+                for batch_idx, (local_data, local_target) in enumerate(train_loader):
+                    local_data = local_data.to(device)
+                    local_target = local_target.to(device)
 
-                    output = model(data_local)
-                    loss = criterion(output, target_local)
+                    output = model(local_data)
+                    loss = criterion(output, local_target)
 
                     loss.backward()
                     optimizer.step()
@@ -154,29 +167,29 @@ if __name__ == "__main__":
                     running_loss += loss.item()
 
             # evaluate model on testset
+            
+            
             model.eval()
             correct = 0
             total = 0
             accuracy = 0
 
             with torch.no_grad():
-                for data_local, target_local in test_loader:
-                    data_local = data_local.to(device)
-                    target_local = target_local.to(device)
+                for local_data, local_target in test_loader:
+                    local_data = local_data.to(device)
+                    local_target = local_target.to(device)
 
-                    output = model(data_local)
+                    output = model(local_data)
                     _, predicted = torch.max(output.data, 1)
-                    total += target_local.size(0)
-                    correct += (predicted == target_local).sum().item()
+                    total += local_target.size(0)
+                    correct += (predicted == local_target).sum().item()
 
                 accuracy = correct / total
                 running_loss = running_loss / len(train_loader) / num_epochs
-                logging.info(
-                    f"Client: {rank} | Round: {round_idx} | Loss: {running_loss:.4f} | Accuracy: {accuracy:.4f}"
-                )
+                logging.info(f"Client: {rank} | Round: {round_idx} | Loss: {running_loss:.4f} | Accuracy: {accuracy:.4f}")
 
             # TODO: send local model params to parameter server
-            comm.send(model.state_dict(), dest=0, tag = 1)
+            comm.send(model.state_dict(),dest=0,tag=rank+50)
 
             # TODO: send number of samples to parameter server
-            comm.send(len(train_loader.dataset), dest=0, tag = 2)
+            comm.send( len(train_data_split[rank-1]),dest=0,tag=rank+100 )

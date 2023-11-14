@@ -32,16 +32,14 @@ if __name__ == "__main__":
 
     # load cifar10 dataset
     train_data, test_data = load_data()
-    train_loader, test_loader = create_dataloader(
-        train_data, test_data, batch_size=batch_size
-    )
+    train_loader, test_loader = create_dataloader(train_data, test_data, batch_size=batch_size)
 
     # compute number of samples for each rank
-    # note that rank 0 is the parameter server, and we have size-1 workers
     num_samples_per_rank = int(batch_size / (size - 1))
 
     for epoch_idx in range(num_epochs):
         running_loss = 0
+
 
         for batch_idx, (data_global, target_global) in enumerate(train_loader):
             if rank == 0:
@@ -49,19 +47,39 @@ if __name__ == "__main__":
                 target_split = torch.split(target_global, num_samples_per_rank, dim=0)
 
                 # TODO: send local data and target to other ranks
+                
+                for i in range(1,size):
+                    local_data = data_split[i-1]
+                    local_target =target_split[i-1]
+                    comm.send(local_data, dest = i, tag = 11)
+                    comm.send(local_target, dest = i, tag = 22)
 
-
+                loss = 0
                 # TODO: receive loss from other ranks and sum them up
-
+                
+                for i in range(1,size):
+                    loss += comm.recv(source = i, tag = 33)
 
                 # TODO: compute average loss by dividing number of global samples, and compute running loss
-
+                
+                loss /= data_global.shape[0]
+                running_loss += loss.item()
 
                 # TODO: receive gradients from other ranks and sum them up
-
+                
+                
+                for param in model.parameters():
+                    param.grad = torch.zeros_like(param.data)
+                    for i in range(1, size):
+                        param.grad += comm.recv(source=i, tag=44)
+                    param.grad /= data_global.shape[0]
 
                 # TODO: update parameters and send updated model to other ranks
-
+                
+                
+                optimizer.step()
+                for i in range(1,size):
+                    comm.send(model, dest = i, tag = 55)
 
                 # clear gradients
                 optimizer.zero_grad()
@@ -76,32 +94,37 @@ if __name__ == "__main__":
             else:
                 model.train()
 
-                # TODO: receive data from rank 0
+                # Receive data from rank 0
+                local_data = comm.recv(source=0, tag=11)
+                local_target = comm.recv(source=0, tag=22)
 
+                # Move data to device
+                local_data = local_data.to(device)
+                local_target = local_target.to(device)
 
-                # TODO: move data to device
+                # Compute loss
+                output = model(local_data)
+                total_loss = criterion(output, local_target)
 
+                # Compute gradients
+                total_loss.backward()
 
-                # TODO: compute loss
+                # Send loss to rank 0, this is not necessary but just for debugging
+                # Remember to multiply loss by the number of local samples
+                total_loss *= local_data.shape[0]
+                comm.send(total_loss, dest = 0, tag = 33)
+                # Send gradients to rank 0, remember to multiply gradients by the number of local samples
+                for param in model.parameters():
+                    param.grad *= local_data.shape[0]
+                    comm.send(param.grad, dest = 0, tag = 44)
 
+                # Receive updated model from rank 0
+                model = comm.recv(source = 0, tag = 55)
 
-                # TODO: compute gradients
-
-
-                # TODO: send loss to rank 0, this is not necessary but just for debugging
-                # remember to multiply loss by number of local samples
-
-
-                # TODO: send gradients to rank 0, remember to multiply gradients by number of local samples
-
-
-                # TODO: receive updated model from rank 0
-
-
-                # clear gradients
+                # Clear gradients
                 optimizer.zero_grad()
 
-    # evaluate model on testset after training on parameter server
+    # Evaluate model on the test set after training on the parameter server
     model.eval()
     if rank == 0:
         with torch.no_grad():

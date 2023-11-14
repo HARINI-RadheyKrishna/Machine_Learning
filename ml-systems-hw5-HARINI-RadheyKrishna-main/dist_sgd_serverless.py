@@ -47,7 +47,7 @@ if __name__ == "__main__":
             data_split = torch.split(data_global, num_samples_per_rank, dim=0)
             target_split = torch.split(target_global, num_samples_per_rank, dim=0)
 
-            data_local = data_split[rank].to(device)
+            data_local = data_split[rank].to(device).requires_grad_()
             target_local = target_split[rank].to(device)
 
             # compute loss
@@ -59,12 +59,18 @@ if __name__ == "__main__":
 
             # TODO: reduce loss to rank 0, this is not necessary but just for debugging
             # remember to multiply loss by number of local samples before reduce
-
+            multiplied_loss = num_samples_per_rank * loss
+            loss = comm.reduce(multiplied_loss, root=0)
 
             # TODO: allreduce gradients for each layer
             # remember to multiply gradients by number of local samples before allreduce
             # and divide gradients by number of global samples after allreduce
-
+            for param in model.parameters():
+                param.grad *= data_local.shape[0]
+                grad = param.grad.clone()  
+                reduced_gradients = comm.allreduce(grad, op=MPI.SUM)
+                reduced_gradients /= data_global.shape[0]
+                param.grad = reduced_gradients
 
             # update parameters
             optimizer.step()
@@ -75,6 +81,7 @@ if __name__ == "__main__":
             # print statistics
             if rank == 0:
                 loss /= data_global.shape[0]
+                #loss = comm.reduce(loss, op=MPI.SUM, root=0)
                 running_loss += loss.item()
 
                 if (batch_idx + 1) % 200 == 0:
